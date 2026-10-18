@@ -19,3 +19,7 @@ This branch builds the EasySkyMesh PowerSaving firmware with one extra feature: 
 - Manually: Actions → Serial builds → Run workflow. Options: an older upstream tag, a preview of a source branch (e.g. `PowerSaving-v18`), or force.
 
 Each run builds every env upstream releases (the list in `build-iotthinks.sh` plus every board in the upstream release assets). It then publishes release `<upstream tag>-serial` with the same file types as upstream: `-upgrade.bin` and `-freshInstall-merged.bin` for ESP32, `.uf2`/`.zip` for nRF52, plus `SHA256SUMS.txt`.
+
+## Credits and license
+- Firmware: [MeshCore](https://github.com/meshcore-dev/MeshCore) by Scott Powell / rippleradios.com and contributors, with the PowerSaving work by [IoTThinks / EasySkyMesh](https://github.com/IoTThinks/EasySkyMesh) ([source](https://github.com/IoTThinks/MeshCore)) and its contributors. Both are MIT licensed; the license text ships with the source as `license.txt`.
+- The serial-in-PowerSaving addition (`serial/`) is released under the same MIT license.

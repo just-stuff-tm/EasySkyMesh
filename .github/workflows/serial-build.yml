@@ -1,0 +1,232 @@
+name: Serial builds
+
+# Builds every firmware env of the upstream EasySkyMesh (PowerSaving) release with the
+# serial-in-PowerSaving change (serial/), and publishes "<upstream tag>-serial".
+# Lives on the "serial" branch; "main" stays an untouched mirror of upstream.
+
+on:
+  push:
+    branches: [serial]
+    paths: ['serial/**', '.github/workflows/serial-build.yml']
+  schedule:
+    - cron: '23 */6 * * *'   # runs only when "serial" is the default branch
+  workflow_dispatch:
+    inputs:
+      upstream_tag:
+        description: 'EasySkyMesh release tag to build (blank = latest upstream release)'
+        required: false
+      source_ref:
+        description: 'Preview: build this MeshCore source instead (branch, commit, or owner/repo@ref), e.g. PowerSaving-v18'
+        required: false
+      force:
+        description: 'Rebuild even if this release already exists'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: serial-build
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      build: ${{ steps.plan.outputs.build }}
+      tag: ${{ steps.plan.outputs.tag }}
+      upstream: ${{ steps.plan.outputs.upstream }}
+      upstream_tag: ${{ steps.plan.outputs.upstream_tag }}
+      upstream_url: ${{ steps.plan.outputs.upstream_url }}
+      source_repo: ${{ steps.plan.outputs.source_repo }}
+      source_ref: ${{ steps.plan.outputs.source_ref }}
+      source_sha: ${{ steps.plan.outputs.source_sha }}
+      patch_id: ${{ steps.plan.outputs.patch_id }}
+      prerelease: ${{ steps.plan.outputs.prerelease }}
+      version: ${{ steps.ver.outputs.version }}
+      envs: ${{ steps.matrix.outputs.envs }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: fork
+
+      - name: Keep main in sync with upstream (same as pressing "Sync fork")
+        if: github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X POST "repos/${GITHUB_REPOSITORY}/merge-upstream" -f branch=main || echo "::warning::Could not sync main with upstream (press Sync fork on main if this keeps happening)"
+
+      - name: Find upstream release and source
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IN_TAG: ${{ inputs.upstream_tag }}
+          IN_SOURCE: ${{ inputs.source_ref }}
+          IN_FORCE: ${{ inputs.force }}
+        run: python3 fork/serial/plan.py
+
+      - name: Get MeshCore source
+        if: steps.plan.outputs.build == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ steps.plan.outputs.source_repo }}
+          ref: ${{ steps.plan.outputs.source_sha }}
+          path: mc
+
+      - name: Check the serial patch applies (fails the run if not)
+        if: steps.plan.outputs.build == 'true'
+        run: python3 fork/serial/apply-serial.py mc
+
+      - name: Firmware version
+        id: ver
+        if: steps.plan.outputs.build == 'true'
+        run: |
+          V=$(sed -n 's/^export FIRMWARE_VERSION="\{0,1\}\([^"]*\)"\{0,1\}.*/\1/p' mc/build-iotthinks.sh 2>/dev/null | head -1)
+          [ -n "$V" ] || V="${{ steps.plan.outputs.upstream_tag }}"
+          echo "version=${V}-serial" >> "$GITHUB_OUTPUT"
+          echo "version=${V}-serial"
+
+      - name: Build list
+        id: matrix
+        if: steps.plan.outputs.build == 'true'
+        run: |
+          ENVS=$(python3 fork/serial/matrix.py mc upstream-assets.txt)
+          echo "envs=$ENVS" >> "$GITHUB_OUTPUT"
+          echo "$ENVS" | python3 -c 'import json,sys;e=json.load(sys.stdin);print(len(e),"envs:"," ".join(e))'
+
+  build:
+    needs: plan
+    if: needs.plan.outputs.build == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        env: ${{ fromJson(needs.plan.outputs.envs) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: fork
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ needs.plan.outputs.source_repo }}
+          ref: ${{ needs.plan.outputs.source_sha }}
+          path: mc
+      - name: Apply serial patch
+        run: python3 fork/serial/apply-serial.py mc
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/pip
+            ~/.platformio/.cache
+          key: ${{ runner.os }}-pio-${{ hashFiles('mc/platformio.ini') }}
+          restore-keys: ${{ runner.os }}-pio-
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: pip install --upgrade platformio
+      - name: Build ${{ matrix.env }}
+        working-directory: mc
+        env:
+          FIRMWARE_VERSION: ${{ needs.plan.outputs.version }}
+        run: |
+          bash build.sh build-firmware "${{ matrix.env }}"
+          ls -la out
+          [ -n "$(ls -A out 2>/dev/null)" ] || { echo "::error::no output files for ${{ matrix.env }}"; exit 1; }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fw-${{ matrix.env }}
+          path: mc/out/*
+          if-no-files-found: error
+
+  release:
+    needs: [plan, build]
+    if: always() && needs.plan.outputs.build == 'true' && needs.plan.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: fw-*
+          merge-multiple: true
+          path: out
+      - name: Check results
+        id: check
+        env:
+          ENVS: ${{ needs.plan.outputs.envs }}
+          VER: ${{ needs.plan.outputs.version }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          envs = json.loads(os.environ["ENVS"]); ver = os.environ["VER"]
+          files = os.listdir("out") if os.path.isdir("out") else []
+          failed = [e for e in envs if not any(f.startswith(f"{e}-{ver}") for f in files)]
+          open("failed.txt", "w").write("\n".join(failed))
+          print(f"{len(files)} files, {len(envs) - len(failed)}/{len(envs)} envs built")
+          if failed: print("failed: " + " ".join(failed))
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"failed_count={len(failed)}\nfiles={len(files)}\n")
+          if not files or len(failed) * 2 > len(envs):
+              raise SystemExit("::error::too many envs failed to build; not publishing")
+          PY
+          cd out && sha256sum * > SHA256SUMS.txt
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.plan.outputs.tag }}
+          VER: ${{ needs.plan.outputs.version }}
+          UP: ${{ needs.plan.outputs.upstream }}
+          UPTAG: ${{ needs.plan.outputs.upstream_tag }}
+          UPURL: ${{ needs.plan.outputs.upstream_url }}
+          SRC: ${{ needs.plan.outputs.source_repo }}
+          REF: ${{ needs.plan.outputs.source_ref }}
+          SHA: ${{ needs.plan.outputs.source_sha }}
+          PID: ${{ needs.plan.outputs.patch_id }}
+          PRE: ${{ needs.plan.outputs.prerelease }}
+        run: |
+          {
+            echo "## ${VER}: PowerSaving with the serial console kept on"
+            echo
+            if [ "$PRE" = "true" ]; then echo "Preview build of \`${SRC}@${REF}\` (not an upstream release yet)."; else echo "Same firmware as upstream [${UP} ${UPTAG}](${UPURL}), plus serial-in-PowerSaving."; fi
+            echo
+            echo "- While power saving, a byte on the serial port (UART0 RX) wakes the board, and it stays awake 15 s after the last byte, so the serial CLI keeps working. Send a CR or LF first, wait about 100 ms, then the command."
+            echo "- \`set serial.ondemand on|off\` (default **on**), \`get serial.ondemand\`. Works over serial and remote admin. **off** = stock PowerSaving behaviour."
+            echo "- Applies to ESP32 boards whose serial port is a UART (e.g. Heltec V3). nRF52 boards and native-USB ESP32 boards already keep serial working and are unchanged."
+            echo "- Updating an existing node: use the \`-upgrade.bin\` (ESP32) or \`.zip\`/\`.uf2\` (nRF52). Fresh install: \`-freshInstall-merged.bin\` (erases the identity)."
+            echo
+            if [ -s failed.txt ]; then echo "Not built this time: $(tr '\n' ' ' < failed.txt)"; echo; fi
+            echo "<sub>source-commit: ${SHA} · patch-id: ${PID} · source: ${SRC}@${REF}</sub>"
+          } > notes.md
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release delete "$TAG" --yes --cleanup-tag
+          fi
+          FLAGS="--latest"; [ "$PRE" = "true" ] && FLAGS="--prerelease --latest=false"
+          gh release create "$TAG" --target "${GITHUB_SHA}" --title "${VER}" --notes-file notes.md $FLAGS out/*
+      - name: Report envs that failed to build
+        if: steps.check.outputs.failed_count != '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.plan.outputs.tag }}
+        run: |
+          gh issue create --title "Serial build ${TAG}: some boards failed to build" \
+            --body "These envs failed: $(tr '\n' ' ' < failed.txt). Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            || echo "::warning::could not open an issue (are Issues enabled on this repo?)"
+
+  report-failure:
+    needs: [plan, build, release]
+    if: always() && (needs.plan.result == 'failure' || needs.release.result == 'failure')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Open an issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.plan.outputs.tag }}
+        run: |
+          URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          T="Serial build failed${TAG:+ for $TAG}"
+          if [ -n "$(gh issue list -R "$GITHUB_REPOSITORY" --state open --search "\"$T\" in:title" --json number -q '.[].number' 2>/dev/null)" ]; then
+            echo "issue already open"; exit 0
+          fi
+          gh issue create -R "$GITHUB_REPOSITORY" --title "$T" --body "Nothing was released. Most likely upstream changed the code the serial patch hooks into (see the 'Check the serial patch applies' step). Run: $URL" \
+            || echo "::warning::could not open an issue (are Issues enabled on this repo?)"

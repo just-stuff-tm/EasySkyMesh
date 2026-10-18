@@ -2,14 +2,13 @@ name: Serial builds
 
 # Builds every firmware env of the upstream EasySkyMesh (PowerSaving) release with the
 # serial-in-PowerSaving change (serial/), and publishes "<upstream tag>-serial".
-# Lives on the "serial" branch; "main" stays an untouched mirror of upstream.
+# Runs on demand (Actions → Run workflow) and on pushes to serial (and to main, if this
+# file is also on main). Scripts always come from the "serial" branch. Skips when
+# "<tag>-serial" is already built from the same source and patch.
 
 on:
   push:
-    branches: [serial]
-    paths: ['serial/**', '.github/workflows/serial-build.yml']
-  schedule:
-    - cron: '23 */6 * * *'   # runs only when "serial" is the default branch
+    branches: [main, serial]
   workflow_dispatch:
     inputs:
       upstream_tag:
@@ -50,13 +49,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: serial
           path: fork
-
-      - name: Keep main in sync with upstream (same as pressing "Sync fork")
-        if: github.event_name == 'schedule'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh api -X POST "repos/${GITHUB_REPOSITORY}/merge-upstream" -f branch=main || echo "::warning::Could not sync main with upstream (press Sync fork on main if this keeps happening)"
 
       - name: Find upstream release and source
         id: plan
@@ -107,6 +101,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: serial
           path: fork
       - uses: actions/checkout@v4
         with:

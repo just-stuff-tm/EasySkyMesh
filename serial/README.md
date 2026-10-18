@@ -1,25 +1,35 @@
-# Serial builds (serial-in-PowerSaving)
+# EasySkyMesh PowerSaving + serial.ondemand
 
-This branch builds the EasySkyMesh PowerSaving firmware with one extra feature: **the serial console keeps working while power saving is on**, so a controller wired to the board's UART (here a LilyGO T-SIM on the Heltec V3's RX/TX pins, GPIO44/43) can always send CLI commands.
+Builds of the [EasySkyMesh](https://github.com/IoTThinks/EasySkyMesh) PowerSaving firmware with one addition, `serial.ondemand`, so the serial console keeps working while power saving is on. (Builds that follow stock MeshCore as soon as it releases are at [just-stuff-tm/MeshCore](https://github.com/just-stuff-tm/MeshCore/releases).)
 
-## What it changes
-- On ESP32 boards whose `Serial` is a UART, a byte on UART0 RX wakes the board from PowerSaving light sleep. The board then stays awake 15 s after the last byte, so whole commands and replies get through. The byte that does the waking is lost, so send a CR or LF, wait about 100 ms, then send the command. The T-SIM firmware already does this.
-- `set serial.ondemand on|off` (default **on**) and `get serial.ondemand`, over serial and remote admin. **off** gives stock PowerSaving behaviour. The setting is stored in NVS (`serialwake` namespace), so it survives reboots and firmware updates without touching upstream's prefs layout.
-- nRF52 and native-USB ESP32 boards are unchanged, because their serial already works during power saving.
-- The code is in `serial/src/helpers/SerialWake.*` (new files) plus three one-line hooks that `serial/apply-serial.py` adds by finding anchors in the code, not line numbers. If upstream moves that code so an anchor is missing, the script fails, the run fails and an issue is opened. No build ships without the serial change.
+## serial.ondemand
+- With power saving on, ESP32 boards light-sleep between packets. While asleep, the UART is stopped, so a controller on the serial port gets no answer. In this setup that's a LilyGO T-SIM on a Heltec V3's GPIO44 (RX) / GPIO43 (TX).
+- With `serial.ondemand` **on** (the default), any byte on UART0 RX wakes the board, and it stays awake 15 s after the last byte.
+- The byte that wakes the board is lost. Send CR or LF, wait about 100 ms, then send the command.
+- Commands, over serial or remote admin:
+  - `set serial.ondemand on` / `set serial.ondemand off` (**off** = the stock PowerSaving behaviour)
+  - `get serial.ondemand`
+- The setting is stored in NVS, so it survives reboots and updates.
+- Applies to ESP32 boards whose serial port is a UART (e.g. Heltec V3). On nRF52 and native-USB ESP32 boards, serial already works during power saving, so nothing changes there.
 
-## How the branches work
-- **main** is a pure mirror of IoTThinks/EasySkyMesh. Never commit to it, so **Sync fork** on main can only fast-forward and never asks you to "discard commits". The scheduled workflow also syncs main automatically.
-- **serial** (this branch) holds only `serial/` and `.github/workflows/serial-build.yml`. Upstream never touches these paths. Don't press Sync fork while viewing **serial**: it isn't meant to track upstream main. A ruleset blocks force-pushes and deletion, so even "Discard commits" can't remove it.
-- The firmware source isn't in EasySkyMesh. It's in IoTThinks/MeshCore, on the branch named in the upstream release notes ("Source code: …/tree/PowerSaving-vNN"). The workflow reads that link from the latest upstream release.
+## Releases
+- Release tag: `<upstream tag>-serial`, e.g. `PowerSaving17.1-serial`. It holds every board upstream releases, with the same file types: ESP32 `-upgrade.bin` (keeps identity) and `-freshInstall-merged.bin`; nRF52 `.uf2`/`.zip`; plus `SHA256SUMS.txt`.
+- File names carry the version with `-serial`, e.g. `Heltec_v3_repeater-PowerSaving17.1.6-serial-upgrade.bin`.
 
-## When a build runs
-- Every 6 hours (needs **serial** as the default branch: Settings → General → Default branch). The run syncs main, checks the latest upstream release and its source commit, and builds if `<tag>-serial` doesn't exist yet or the source or patch changed.
-- On any push to **serial** that touches `serial/` or the workflow.
-- Manually: Actions → Serial builds → Run workflow. Options: an older upstream tag, a preview of a source branch (e.g. `PowerSaving-v18`), or force.
+## When EasySkyMesh releases
+Press **Run workflow** (Actions → "Serial builds" → Run workflow). Pushes to `serial` also start a build. There is no schedule.
+- The workflow reads the latest upstream release, finds the source branch named in its notes ("Source code: …/tree/PowerSaving-vNN" in IoTThinks/MeshCore), applies `serial/`, builds everything and publishes `<tag>-serial`.
+- If that tag is already built from the same commit and patch, the run ends after a few seconds. Options: **upstream_tag** (an older release), **source_ref** (a preview of a source branch, e.g. `PowerSaving-v18`, published as a pre-release), and **force**.
+- If the patch no longer fits, the run fails, an issue is opened (when Issues are enabled), and nothing is released.
+- GitHub only shows the **Run workflow** button for workflows on the default branch, so set the default branch to **serial** (Settings → General → Default branch). Alternatively, from a terminal: `gh workflow run serial-build.yml -R just-stuff-tm/EasySkyMesh --ref serial`.
 
-Each run builds every env upstream releases (the list in `build-iotthinks.sh` plus every board in the upstream release assets). It then publishes release `<upstream tag>-serial` with the same file types as upstream: `-upgrade.bin` and `-freshInstall-merged.bin` for ESP32, `.uf2`/`.zip` for nRF52, plus `SHA256SUMS.txt`.
+## Branches
+- **main** is an untouched mirror of IoTThinks/EasySkyMesh, so **Sync fork** there always fast-forwards. Syncing main doesn't start a build, because main has no workflow file. Press Run workflow afterwards.
+- **serial** holds only `serial/` and `.github/workflows/serial-build.yml`. A ruleset blocks force-pushes and deletion. Don't press Sync fork while viewing serial.
+
+## How the patch is applied
+`serial/src/helpers/SerialWake.{h,cpp}` are copied in. `serial/apply-serial.py` then adds three one-line hooks, found by matching code rather than line numbers: in `ESP32Board.h` (include, and around `esp_light_sleep_start()`) and in `CommonCLI::handleCommand()`.
 
 ## Credits and license
 - Firmware: [MeshCore](https://github.com/meshcore-dev/MeshCore) by Scott Powell / rippleradios.com and contributors, with the PowerSaving work by [IoTThinks / EasySkyMesh](https://github.com/IoTThinks/EasySkyMesh) ([source](https://github.com/IoTThinks/MeshCore)) and its contributors. Both are MIT licensed; the license text ships with the source as `license.txt`.
-- The serial-in-PowerSaving addition (`serial/`) is released under the same MIT license.
+- The serial.ondemand addition (`serial/`) is released under the same MIT license.

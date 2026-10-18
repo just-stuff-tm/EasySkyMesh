@@ -1,3 +1,5 @@
+> **This branch (`serial`)**: EasySkyMesh PowerSaving firmware + **serial.ondemand** (the serial console keeps working during power saving). Downloads: [Releases](https://github.com/just-stuff-tm/EasySkyMesh/releases) (`<tag>-serial`). Details: [serial/README.md](serial/README.md).
+
 # EasySkyMesh: IoT Solutions on MeshCore
 We build Long-Range and Low-Power IoT applications on MeshCore.
 - Develop optimized firmware for long-range, low-power mesh deployments.
